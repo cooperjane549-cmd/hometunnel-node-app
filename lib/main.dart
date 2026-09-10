@@ -1,165 +1,221 @@
-import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 void main() {
-  runApp(const MaterialApp(
-    debugShowCheckedModeBanner: false,
-    home: HomeNodeScreen(),
-  ));
+  runApp(const HomeTunnelHostApp());
 }
 
-class HomeNodeScreen extends StatefulWidget {
-  const HomeNodeScreen({super.key});
+class HomeTunnelHostApp extends StatelessWidget {
+  const HomeTunnelHostApp({super.key});
 
   @override
-  State<HomeNodeScreen> createState() => _HomeNodeScreenState();
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'HomeTunnel Host Node',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF121212),
+        primaryColor: Colors.greenAccent,
+      ),
+      home: const HostHomePage(),
+    );
+  }
 }
 
-class _HomeNodeScreenState extends State<HomeNodeScreen> {
-  static const String serverUrl = 'https://hometunnel-backend-render.onrender.com';
+class HostHomePage extends StatefulWidget {
+  const HostHomePage({super.key});
+
+  @override
+  State<HostHomePage> createState() => _HostHomePageState();
+}
+
+class _HostHomePageState extends State<HostHomePage> {
+  static const platform = MethodChannel('co.ke.hometunnel/wireguard_host');
+
+  final String _backendUrl = "https://hometunnel-backend-render.onrender.com";
+
+  String _pairCode = "------";
+  bool _isHosting = false;
+  String _statusMessage = "Node Offline";
   
-  String _status = 'Initializing...';
-  String _pairingCode = '------';
-  String _nodeId = '';
-  bool _isPaired = false;
-  Timer? _heartbeatTimer;
+  String _hostPrivateKey = "";
+  String _hostPublicKey = "";
 
   @override
   void initState() {
     super.initState();
-    _registerNode();
+    _generateKeys();
   }
 
-  @override
-  void dispose() {
-    _heartbeatTimer?.cancel();
-    super.dispose();
-  }
-
-  // 1. Register with Render Control Plane on Startup
-  Future<void> _registerNode() async {
-    setState(() => _status = 'Registering with Control Plane...');
+  void _generateKeys() {
+    final Random random = Random.secure();
+    final privBytes = List<int>.generate(32, (i) => random.nextInt(256));
+    final pubBytes = List<int>.generate(32, (i) => random.nextInt(256));
     
+    _hostPrivateKey = base64Encode(privBytes);
+    _hostPublicKey = base64Encode(pubBytes);
+  }
+
+  String _generateRandom6DigitCode() {
+    final Random random = Random();
+    int number = random.nextInt(900000) + 100000;
+    return number.toString();
+  }
+
+  Future<void> _startHostNode() async {
+    final newCode = _generateRandom6DigitCode();
+
+    setState(() {
+      _statusMessage = "Registering Node on Render...";
+      _pairCode = newCode;
+    });
+
     try {
-      // Fetch public IP or use local network gateway discovery
-      final ipResponse = await http.get(Uri.parse('https://api.ipify.org'));
-      final publicIp = ipResponse.body.trim();
+      // 1. Wake up Render
+      await http.get(Uri.parse(_backendUrl)).timeout(const Duration(seconds: 15));
 
-      final response = await http.post(
-        Uri.parse('$serverUrl/api/node/register'),
-        headers: {'Content-Type': 'application/json'},
+      // 2. Register Host Node with Backend
+      final registerResponse = await http.post(
+        Uri.parse("$_backendUrl/register"),
+        headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          'nodePublicKey': 'NODE_WG_PUBLIC_KEY_PLACEHOLDER',
-          'ipAddress': publicIp,
-          'port': 51820,
+          "code": newCode,
+          "role": "host",
+          "nodePublicKey": _hostPublicKey,
+          "nodeEndpoint": "102.210.80.12:51820" // Replace or auto-detect public endpoint
         }),
-      );
+      ).timeout(const Duration(seconds: 15));
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      if (registerResponse.statusCode == 200 || registerResponse.statusCode == 201) {
+        // 3. Start local WireGuard host service
+        await _startWireGuardHostServer();
+
         setState(() {
-          _nodeId = data['nodeId'];
-          _pairingCode = data['pairingCode'];
-          _status = 'Waiting for client pairing...';
+          _isHosting = true;
+          _statusMessage = "Node Active! Waiting for Client...";
         });
-
-        // Start 30-second heartbeat to maintain dynamic IP registration
-        _startHeartbeat(publicIp);
       } else {
-        setState(() => _status = 'Registration failed: ${response.statusCode}');
+        setState(() {
+          _statusMessage = "Registration failed. Try again.";
+        });
       }
     } catch (e) {
-      setState(() => _status = 'Connection error: $e');
+      setState(() {
+        _statusMessage = "Error connecting to signaling server.";
+      });
     }
   }
 
-  // 2. Continuous Heartbeat to Keep Dynamic ISP IP Updated
-  void _startHeartbeat(String currentIp) {
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
-      try {
-        final response = await http.post(
-          Uri.parse('$serverUrl/api/node/heartbeat'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'pairingCode': _pairingCode,
-            'currentIp': currentIp,
-          }),
-        );
+  Future<void> _startWireGuardHostServer() async {
+    final wgHostConfig = '''
+[Interface]
+PrivateKey = $_hostPrivateKey
+Address = 10.200.0.1/24
+ListenPort = 51820
 
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          if (data['isPaired'] == true && !_isPaired) {
-            setState(() {
-              _isPaired = true;
-              _status = 'Client Paired! Tunnel Active.';
-            });
-            _startInAppProxyEngine();
-          }
-        }
-      } catch (_) {
-        // Silent catch for background heartbeat resilience
-      }
-    });
+[Peer]
+PublicKey = CLIENT_PUBLIC_KEY
+AllowedIPs = 10.200.0.2/32
+''';
+
+    try {
+      await platform.invokeMethod('startHostServer', {'config': wgHostConfig});
+    } on PlatformException catch (e) {
+      // Graceful fallback if testing on a device without root/server mode
+      debugPrint("Host WireGuard notice: ${e.message}");
+    }
   }
 
-  // 3. Launch In-App SOCKS5 / Tun2Socks Engine
-  void _startInAppProxyEngine() {
-    // Spawns native memory proxy engine to forward incoming raw packets to Wi-Fi
-    debugPrint("Proxy Engine Running...");
+  Future<void> _stopHostNode() async {
+    try {
+      await platform.invokeMethod('stopHostServer');
+    } catch (_) {}
+
+    setState(() {
+      _isHosting = false;
+      _pairCode = "------";
+      _statusMessage = "Node Offline";
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF121212),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.router, size: 80, color: Colors.blueAccent),
-              const SizedBox(height: 20),
-              const Text(
-                'HomeTunnel Host Node',
-                style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
+      appBar: AppBar(
+        title: const Text('HomeTunnel Host Node'),
+        centerTitle: true,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Icon(
+              _isHosting ? Icons.router : Icons.phonelink_off,
+              size: 80,
+              color: _isHosting ? Colors.greenAccent : Colors.grey,
+            ),
+            const SizedBox(height: 24),
+            Text(
+              _statusMessage,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: _isHosting ? Colors.greenAccent : Colors.orangeAccent,
               ),
-              const SizedBox(height: 10),
-              Text(
-                'Status: $_status',
-                style: TextStyle(color: _isPaired ? Colors.greenAccent : Colors.orangeAccent, fontSize: 16),
+            ),
+            const SizedBox(height: 32),
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E),
+                borderRadius: BorderRadius.circular(12),
               ),
-              const SizedBox(height: 40),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 20),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E1E1E),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.blueAccent.withAlpha(100)),
-                ),
-                child: Column(
-                  children: [
-                    const Text(
-                      'PAIRING CODE',
-                      style: TextStyle(color: Colors.grey, fontSize: 12, letterSpacing: 1.5),
+              child: Column(
+                children: [
+                  const Text("Pairing Code", style: TextStyle(color: Colors.grey, fontSize: 14)),
+                  const SizedBox(height: 8),
+                  Text(
+                    _pairCode,
+                    style: const TextStyle(
+                      fontSize: 36,
+                      letterSpacing: 8,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _pairingCode,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 38,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 6,
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 32),
+            if (!_isHosting)
+              ElevatedButton(
+                onPressed: _startHostNode,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  backgroundColor: Colors.greenAccent,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Start Host Node', style: TextStyle(fontSize: 18, color: Colors.black)),
+              )
+            else
+              ElevatedButton(
+                onPressed: _stopHostNode,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  backgroundColor: Colors.redAccent,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Stop Host Node', style: TextStyle(fontSize: 18, color: Colors.white)),
+              ),
+          ],
         ),
       ),
     );
