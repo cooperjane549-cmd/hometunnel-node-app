@@ -1,11 +1,11 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="co.ke.hometunnel.client">
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="co.ke.hometunnel.node">
 
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 
     <application
-        android:label="HomeTunnel Client"
+        android:label="HomeTunnel Node"
         android:name="${applicationName}"
         android:icon="@drawable/ic_launcher">
 
@@ -33,3 +33,5 @@
         </activity>
     </application>
 </manifest>
+
+
