@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Background Circle -->
+    <path
+        android:fillColor="#0D47A1"
+        android:pathData="M54,0 A54,54 0 1,0 54,108 A54,54 0 1,0 54,0 Z"/>
+
+    <!-- Home Tunnel Outer Ring -->
+    <path
+        android:fillColor="#1E88E5"
+        android:pathData="M54,20 A34,34 0 1,0 54,88 A34,34 0 1,0 54,20 Z"/>
+
+    <!-- Inner Core -->
+    <path
+        android:fillColor="#64B5F6"
+        android:pathData="M54,36 A18,18 0 1,0 54,72 A18,18 0 1,0 54,36 Z"/>
+
+    <!-- Tunnel Connection Arrow -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,42 L66,54 L48,66 Z"/>
+</vector>
