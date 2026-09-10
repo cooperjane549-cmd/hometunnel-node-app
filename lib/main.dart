@@ -34,13 +34,13 @@ class HostHomePage extends StatefulWidget {
 
 class _HostHomePageState extends State<HostHomePage> {
   static const platform = MethodChannel('co.ke.hometunnel/wireguard_host');
+
   final String _backendUrl = "https://hometunnel-backend-render.onrender.com";
 
   String _pairCode = "------";
   bool _isHosting = false;
-  bool _isLoading = false;
   String _statusMessage = "Node Offline";
-  
+
   String _hostPrivateKey = "";
   String _hostPublicKey = "";
 
@@ -52,62 +52,69 @@ class _HostHomePageState extends State<HostHomePage> {
 
   void _generateKeys() {
     final Random random = Random.secure();
-    final privBytes = List<int>.generate(32, (i) => random.nextInt(256));
-    final pubBytes = List<int>.generate(32, (i) => random.nextInt(256));
+    final List<int> privKey = List<int>.generate(32, (_) => random.nextInt(256));
     
-    _hostPrivateKey = base64Encode(privBytes);
-    _hostPublicKey = base64Encode(pubBytes);
+    // Clamp private key for WireGuard Curve25519
+    privKey[0] &= 248;
+    privKey[31] &= 127;
+    privKey[31] |= 64;
+
+    final List<int> pubKey = List<int>.generate(32, (_) => random.nextInt(256));
+
+    _hostPrivateKey = base64Encode(privKey);
+    _hostPublicKey = base64Encode(pubKey);
+  }
+
+  String _generateRandom6DigitCode() {
+    final Random random = Random();
+    int number = random.nextInt(900000) + 100000;
+    return number.toString();
   }
 
   Future<void> _startHostNode() async {
+    final newCode = _generateRandom6DigitCode();
+
     setState(() {
-      _isLoading = true;
       _statusMessage = "Registering Node on Render...";
+      _pairCode = newCode;
     });
 
     try {
-      // 1. Ping Render to handle cold-start wakeup
       await http.get(Uri.parse(_backendUrl)).timeout(const Duration(seconds: 15));
 
-      // 2. Post registration to /api/node/register (Matching Backend)
       final registerResponse = await http.post(
-        Uri.parse("$_backendUrl/api/node/register"),
+        Uri.parse("$_backendUrl/register"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
+          "code": newCode,
+          "role": "host",
           "nodePublicKey": _hostPublicKey,
-          "ipAddress": "102.210.80.12", // Replace with dynamic IP if required
-          "port": 51820
+          "nodeEndpoint": "102.210.80.12:51820"
         }),
       ).timeout(const Duration(seconds: 15));
 
       if (registerResponse.statusCode == 200 || registerResponse.statusCode == 201) {
-        final data = jsonDecode(registerResponse.body);
-        final String returnedCode = data['pairingCode'] ?? "000000";
-
-        // 3. Launch host WireGuard tunnel backend
         await _startWireGuardHostServer();
 
         setState(() {
           _isHosting = true;
-          _isLoading = false;
-          _pairCode = returnedCode;
           _statusMessage = "Node Active! Waiting for Client...";
         });
       } else {
         setState(() {
-          _isLoading = false;
-          _statusMessage = "Registration failed (${registerResponse.statusCode}).";
+          _statusMessage = "Registration failed. Try again.";
         });
       }
     } catch (e) {
       setState(() {
-        _isLoading = false;
         _statusMessage = "Error connecting to signaling server.";
       });
     }
   }
 
   Future<void> _startWireGuardHostServer() async {
+    final dummyClientPubKey = _generateDummyPublicKey();
+
     final wgHostConfig = '''
 [Interface]
 PrivateKey = $_hostPrivateKey
@@ -115,7 +122,7 @@ Address = 10.200.0.1/24
 ListenPort = 51820
 
 [Peer]
-PublicKey = CLIENT_PUBLIC_KEY
+PublicKey = $dummyClientPubKey
 AllowedIPs = 10.200.0.2/32
 ''';
 
@@ -124,6 +131,12 @@ AllowedIPs = 10.200.0.2/32
     } on PlatformException catch (e) {
       debugPrint("Host WireGuard notice: ${e.message}");
     }
+  }
+
+  String _generateDummyPublicKey() {
+    final Random random = Random.secure();
+    final List<int> key = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64Encode(key);
   }
 
   Future<void> _stopHostNode() async {
@@ -194,15 +207,13 @@ AllowedIPs = 10.200.0.2/32
             const SizedBox(height: 32),
             if (!_isHosting)
               ElevatedButton(
-                onPressed: _isLoading ? null : _startHostNode,
+                onPressed: _startHostNode,
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   backgroundColor: Colors.greenAccent,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-                child: _isLoading
-                    ? const CircularProgressIndicator(color: Colors.black)
-                    : const Text('Start Host Node', style: TextStyle(fontSize: 18, color: Colors.black, fontWeight: FontWeight.bold)),
+                child: const Text('Start Host Node', style: TextStyle(fontSize: 18, color: Colors.black)),
               )
             else
               ElevatedButton(
