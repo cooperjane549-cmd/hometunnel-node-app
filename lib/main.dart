@@ -34,11 +34,11 @@ class HostHomePage extends StatefulWidget {
 
 class _HostHomePageState extends State<HostHomePage> {
   static const platform = MethodChannel('co.ke.hometunnel/wireguard_host');
-
   final String _backendUrl = "https://hometunnel-backend-render.onrender.com";
 
   String _pairCode = "------";
   bool _isHosting = false;
+  bool _isLoading = false;
   String _statusMessage = "Node Offline";
   
   String _hostPrivateKey = "";
@@ -59,51 +59,49 @@ class _HostHomePageState extends State<HostHomePage> {
     _hostPublicKey = base64Encode(pubBytes);
   }
 
-  String _generateRandom6DigitCode() {
-    final Random random = Random();
-    int number = random.nextInt(900000) + 100000;
-    return number.toString();
-  }
-
   Future<void> _startHostNode() async {
-    final newCode = _generateRandom6DigitCode();
-
     setState(() {
+      _isLoading = true;
       _statusMessage = "Registering Node on Render...";
-      _pairCode = newCode;
     });
 
     try {
-      // 1. Wake up Render
+      // 1. Ping Render to handle cold-start wakeup
       await http.get(Uri.parse(_backendUrl)).timeout(const Duration(seconds: 15));
 
-      // 2. Register Host Node with Backend
+      // 2. Post registration to /api/node/register (Matching Backend)
       final registerResponse = await http.post(
-        Uri.parse("$_backendUrl/register"),
+        Uri.parse("$_backendUrl/api/node/register"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          "code": newCode,
-          "role": "host",
           "nodePublicKey": _hostPublicKey,
-          "nodeEndpoint": "102.210.80.12:51820" // Replace or auto-detect public endpoint
+          "ipAddress": "102.210.80.12", // Replace with dynamic IP if required
+          "port": 51820
         }),
       ).timeout(const Duration(seconds: 15));
 
       if (registerResponse.statusCode == 200 || registerResponse.statusCode == 201) {
-        // 3. Start local WireGuard host service
+        final data = jsonDecode(registerResponse.body);
+        final String returnedCode = data['pairingCode'] ?? "000000";
+
+        // 3. Launch host WireGuard tunnel backend
         await _startWireGuardHostServer();
 
         setState(() {
           _isHosting = true;
+          _isLoading = false;
+          _pairCode = returnedCode;
           _statusMessage = "Node Active! Waiting for Client...";
         });
       } else {
         setState(() {
-          _statusMessage = "Registration failed. Try again.";
+          _isLoading = false;
+          _statusMessage = "Registration failed (${registerResponse.statusCode}).";
         });
       }
     } catch (e) {
       setState(() {
+        _isLoading = false;
         _statusMessage = "Error connecting to signaling server.";
       });
     }
@@ -124,7 +122,6 @@ AllowedIPs = 10.200.0.2/32
     try {
       await platform.invokeMethod('startHostServer', {'config': wgHostConfig});
     } on PlatformException catch (e) {
-      // Graceful fallback if testing on a device without root/server mode
       debugPrint("Host WireGuard notice: ${e.message}");
     }
   }
@@ -197,13 +194,15 @@ AllowedIPs = 10.200.0.2/32
             const SizedBox(height: 32),
             if (!_isHosting)
               ElevatedButton(
-                onPressed: _startHostNode,
+                onPressed: _isLoading ? null : _startHostNode,
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   backgroundColor: Colors.greenAccent,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-                child: const Text('Start Host Node', style: TextStyle(fontSize: 18, color: Colors.black)),
+                child: _isLoading
+                    ? const CircularProgressIndicator(color: Colors.black)
+                    : const Text('Start Host Node', style: TextStyle(fontSize: 18, color: Colors.black, fontWeight: FontWeight.bold)),
               )
             else
               ElevatedButton(
