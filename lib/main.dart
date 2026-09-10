@@ -34,7 +34,6 @@ class HostHomePage extends StatefulWidget {
 
 class _HostHomePageState extends State<HostHomePage> {
   static const platform = MethodChannel('co.ke.hometunnel/wireguard_host');
-
   final String _backendUrl = "https://hometunnel-backend-render.onrender.com";
 
   String _pairCode = "------";
@@ -52,48 +51,60 @@ class _HostHomePageState extends State<HostHomePage> {
 
   void _generateKeys() {
     final Random random = Random.secure();
-    final List<int> privKey = List<int>.generate(32, (_) => random.nextInt(256));
+    final List<int> privKeyBytes = List<int>.generate(32, (_) => random.nextInt(256));
     
-    // Clamp private key for WireGuard Curve25519
-    privKey[0] &= 248;
-    privKey[31] &= 127;
-    privKey[31] |= 64;
+    // Clamp key bytes according to Curve25519 specification
+    privKeyBytes[0] &= 248;
+    privKeyBytes[31] &= 127;
+    privKeyBytes[31] |= 64;
 
-    final List<int> pubKey = List<int>.generate(32, (_) => random.nextInt(256));
+    final List<int> pubKeyBytes = List<int>.generate(32, (_) => random.nextInt(256));
 
-    _hostPrivateKey = base64Encode(privKey);
-    _hostPublicKey = base64Encode(pubKey);
+    _hostPrivateKey = base64Encode(privKeyBytes);
+    _hostPublicKey = base64Encode(pubKeyBytes);
   }
 
-  String _generateRandom6DigitCode() {
+  String _generate6DigitCode() {
     final Random random = Random();
-    int number = random.nextInt(900000) + 100000;
-    return number.toString();
+    return (random.nextInt(900000) + 100000).toString();
   }
 
   Future<void> _startHostNode() async {
-    final newCode = _generateRandom6DigitCode();
+    final newCode = _generate6DigitCode();
 
     setState(() {
-      _statusMessage = "Registering Node on Render...";
+      _statusMessage = "Waking up Render backend...";
       _pairCode = newCode;
     });
 
     try {
-      await http.get(Uri.parse(_backendUrl)).timeout(const Duration(seconds: 15));
+      // Warm up Render instance
+      await http.get(Uri.parse(_backendUrl)).timeout(const Duration(seconds: 20));
+
+      setState(() {
+        _statusMessage = "Registering Node on Render...";
+      });
+
+      // Fetch public endpoint IP or fallback to standard interface IP
+      String externalIp = "127.0.0.1";
+      try {
+        final ipResponse = await http.get(Uri.parse("https://api.ipify.org")).timeout(const Duration(seconds: 5));
+        if (ipResponse.statusCode == 200) {
+          externalIp = ipResponse.body.trim();
+        }
+      } catch (_) {}
 
       final registerResponse = await http.post(
         Uri.parse("$_backendUrl/register"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "code": newCode,
-          "role": "host",
           "nodePublicKey": _hostPublicKey,
-          "nodeEndpoint": "102.210.80.12:51820"
+          "nodeEndpoint": "$externalIp:51820"
         }),
       ).timeout(const Duration(seconds: 15));
 
-      if (registerResponse.statusCode == 200 || registerResponse.statusCode == 201) {
+      if (registerResponse.statusCode == 200) {
         await _startWireGuardHostServer();
 
         setState(() {
@@ -101,19 +112,21 @@ class _HostHomePageState extends State<HostHomePage> {
           _statusMessage = "Node Active! Waiting for Client...";
         });
       } else {
+        final body = jsonDecode(registerResponse.body);
         setState(() {
-          _statusMessage = "Registration failed. Try again.";
+          _statusMessage = body['message'] ?? "Registration failed. Try again.";
         });
       }
     } catch (e) {
       setState(() {
-        _statusMessage = "Error connecting to signaling server.";
+        _statusMessage = "Connection timeout. Try again.";
       });
     }
   }
 
   Future<void> _startWireGuardHostServer() async {
-    final dummyClientPubKey = _generateDummyPublicKey();
+    final List<int> peerKeyBytes = List<int>.generate(32, (_) => Random.secure().nextInt(256));
+    final dummyClientPubKey = base64Encode(peerKeyBytes);
 
     final wgHostConfig = '''
 [Interface]
@@ -129,14 +142,8 @@ AllowedIPs = 10.200.0.2/32
     try {
       await platform.invokeMethod('startHostServer', {'config': wgHostConfig});
     } on PlatformException catch (e) {
-      debugPrint("Host WireGuard notice: ${e.message}");
+      debugPrint("Host platform notice: ${e.message}");
     }
-  }
-
-  String _generateDummyPublicKey() {
-    final Random random = Random.secure();
-    final List<int> key = List<int>.generate(32, (_) => random.nextInt(256));
-    return base64Encode(key);
   }
 
   Future<void> _stopHostNode() async {
